@@ -10,6 +10,7 @@ use {
         ser::{SerializeStruct, SerializeTupleStruct},
         Serialize,
     },
+    serde_json::{to_writer, Error},
     std::{convert::TryFrom, fs::File},
 };
 
@@ -30,7 +31,6 @@ impl Hashable for String {
     }
 }
 
-#[derive(Debug)]
 struct Account {
     user: String,
     pass: String,
@@ -80,8 +80,8 @@ impl Database {
         }
         Ok(self.0[account.pass.hash()].push(account))
     }
-    fn find(&self, user: String, pass: String) -> Option<&Account> {
-        let row = &self.0[pass.hash()];
+    fn find(&self, user: &str, pass: &str) -> Option<&Account> {
+        let row = &self.0[pass.to_string().hash()];
         if row.len() > 0 {
             for account in row.iter() {
                 if user == account.user && pass == account.pass {
@@ -97,14 +97,8 @@ impl Database {
         Self((0..((MAX - MIN) / PRIME) + 1).map(|_| Vec::new()).collect())
     }
     //  Make asyncronous at some point
-    fn backup(&self) {
-        println!(
-            "{}",
-            match serde_json::to_writer(File::create("accounts.json").unwrap(), &self.0) {
-                Ok(_) => "Success",
-                Err(_) => "Error",
-            }
-        )
+    fn _backup(&self) -> Result<(), Error> {
+        to_writer(File::create("accounts.json").unwrap(), &self.0)
     }
 }
 impl Serialize for Database {
@@ -121,37 +115,41 @@ impl Serialize for Database {
 fn main() {
     let mut data = Database::new();
 
-    //  Generate a ton of random accounts
-    for _ in 0..1_000_000 {
+    //  The total amount of random accounts to be generated
+    let amount = 10_000_000;
+
+    println!("Generating {} accounts...", amount);
+
+    for _ in 0..amount {
         if let Err(account) = data.add(Account::random()) {
-            println!("{:?}", account)
+            println!("{}", account.pass)
         }
     }
-    //  Add a specific account
-    let test = Account::new("OwenIsGay", "SuhjinTheFuck69").unwrap();
-    drop(data.add(Account::new("OwenIsGay", "SuhjinTheFuck69").unwrap()));
+    //  The testing account's ("TA") username and password
+    let (user, pass) = ("John", "EatMyWhale69");
 
-    //  Benchmark how long it takes to find that specific account
+    //  Create the TA
+    let test = Account::new(user, pass).unwrap();
+
+    //  Add the TA to the filled database
+    drop(data.add(test));
+
+    //  Benchmark how long it takes to find the TA
     let a = SystemTime::now();
-    let option = data.find(test.user, test.pass);
+    let found = data.find(user, pass);
     let b = SystemTime::now();
 
     //  Checks if the find was successful
-    match option {
-        Some(user) => println!("{:?}", user),
-        _ => println!("None"),
-    }
-
-    //  How long it took to find the account
-    println!("{:?}\n", b.duration_since(a));
-
-    //  The total amount of accounts inside of the database
-    println!("Total amount of accounts = {}", {
-        let mut total = 0;
-        for row in data.0.iter() {
-            total += row.len()
+    println!(
+        "\n=== {} === [{:?}]\nTotal amount of accounts :: {}\n",
+        if let Some(_) = found { "Pass" } else { "Fail" },
+        b.duration_since(a).unwrap(),
+        {
+            let mut total = 0;
+            for row in data.0.iter() {
+                total += row.len()
+            }
+            total
         }
-        total
-    });
-    data.backup()
+    );
 }
