@@ -74,12 +74,10 @@ impl Serialize for Account {
 struct Database(Vec<Vec<Account>>);
 
 impl Database {
-    fn add(&mut self, account: Account) -> Result<(), Account> {
-        if account.pass.hash() == 4294967295 {
-            return Err(account);
-        }
-        Ok(self.0[account.pass.hash()].push(account))
+    fn add(&mut self, account: Account) {
+        self.0[account.pass.hash()].push(account)
     }
+    //  Search method based on the hash value of the Account's `pass`
     fn find(&self, user: &str, pass: &str) -> Option<&Account> {
         let row = &self.0[pass.to_string().hash()];
         if row.len() > 0 {
@@ -92,6 +90,17 @@ impl Database {
         } else {
             None
         }
+    }
+    //  Basic for iteration
+    fn normal(&self, user: &str, pass: &str) -> Option<&Account> {
+        for x in self.0.iter() {
+            for account in x.iter() {
+                if account.user == user && account.pass == pass {
+                    return Some(account);
+                }
+            }
+        }
+        None
     }
     fn new() -> Self {
         Self((0..((MAX - MIN) / PRIME) + 1).map(|_| Vec::new()).collect())
@@ -121,9 +130,7 @@ fn main() {
     println!("Generating {} accounts...", amount);
 
     for _ in 0..amount {
-        if let Err(account) = data.add(Account::random()) {
-            println!("{}", account.pass)
-        }
+        data.add(Account::random())
     }
     //  The testing account's ("TA") username and password
     let (user, pass) = ("John", "EatMyWhale69");
@@ -132,18 +139,30 @@ fn main() {
     let test = Account::new(user, pass).unwrap();
 
     //  Add the TA to the filled database
-    drop(data.add(test));
+    data.add(test);
 
-    //  Benchmark how long it takes to find the TA
-    let a = SystemTime::now();
-    let found = data.find(user, pass);
-    let b = SystemTime::now();
+    //  Hash method
+    let a1 = SystemTime::now();
+    let f1 = data.find(user, pass);
+    let b1 = SystemTime::now();
+
+    //  Basic for loop
+    let a2 = SystemTime::now();
+    let f2 = data.normal(user, pass);
+    let b2 = SystemTime::now();
+
+    let t1 = b1.duration_since(a1).unwrap();
+    let t2 = b2.duration_since(a2).unwrap();
 
     //  Checks if the find was successful
     println!(
-        "\n=== {} === [{:?}]\nTotal amount of accounts :: {}\n",
-        if let Some(_) = found { "Pass" } else { "Fail" },
-        b.duration_since(a).unwrap(),
+        "\nHash Method === {} === [{:?}]\nFor Loop === {} === [{:?}]\n\nHash over for loop :: {:.2}\nTotal amount of accounts :: {}\n",
+        if let Some(_) = f1 { "Pass" } else { "Fail" },
+        t1,
+        if let Some(_) = f2 { "Pass" } else { "Fail" },
+        t2,
+        t2.as_secs_f64() / t1.as_secs_f64(),
+
         {
             let mut total = 0;
             for row in data.0.iter() {
