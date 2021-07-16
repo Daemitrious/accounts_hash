@@ -10,7 +10,7 @@ const ASCII: [char; 94] = [
 ];
 
 //  TP
-fn randint(range: Range<usize>) -> usize {
+pub fn randint(range: Range<usize>) -> usize {
     rand::thread_rng().gen_range(range)
 }
 //  TP
