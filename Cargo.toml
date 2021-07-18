@@ -4,18 +4,13 @@ version = "0.1.0"
 authors = ["Daemitrious <evandotschwartzentruber@gmail.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+    benchmark = []
+    testing = ["rand"]
+    default = []
 
-[dependencies.tokio]
-version = "1.5.0"
-features = ["macros", "rt-multi-thread"]
-
-[dependencies.serde]
-version = "1.0.126"
-features = ["derive"]
-
-[dependencies.serde_json]
-version = "1.0.64"
-
-#   [dependencies.rand]
-#   version = "0.8.4"
+[dependencies]
+tokio = { version = "1.5.0", features = ["macros", "rt-multi-thread"] }
+serde = { version = "1.0.126", features = ["derive"] }
+serde_json = { version = "1.0.64" }
+rand = { version = "0.8.4", optional = true }
