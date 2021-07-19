@@ -10,11 +10,12 @@ use testing::*;
 
 use {
     serde::{Deserialize, Serialize},
-    serde_json::{from_reader, to_writer, Error as sj_Error},
+    serde_json::{from_reader, to_writer, Error as SjError},
     std::{
         convert::TryFrom,
+        env::{var, VarError},
         fs::File,
-        io::{stdin, BufReader, Error as io_Error},
+        io::{stdin, BufReader, Error as IoError},
     },
 };
 
@@ -36,6 +37,28 @@ const ERRORS: [&str; 7] = [
     "Password is too long",
 ];
 
+//  Simple error handling
+enum Error {
+    SjError(SjError),
+    IoError(IoError),
+    VarError(VarError),
+}
+impl From<SjError> for Error {
+    fn from(error: SjError) -> Self {
+        Error::SjError(error)
+    }
+}
+impl From<IoError> for Error {
+    fn from(error: IoError) -> Self {
+        Error::IoError(error)
+    }
+}
+impl From<VarError> for Error {
+    fn from(error: VarError) -> Self {
+        Error::VarError(error)
+    }
+}
+
 //  Applies a `hash` function to `String` to conveniently grab the native endian integer value
 trait Hashable {
     fn hash(&self) -> usize;
@@ -48,7 +71,7 @@ impl Hashable for String {
 }
 
 //  Simple `stdin`
-async fn input() -> Result<String, io_Error> {
+async fn input() -> Result<String, IoError> {
     let mut line = String::new();
     stdin().read_line(&mut line)?;
     Ok(line)
@@ -130,13 +153,13 @@ impl Database {
     }
 
     //  Backup the database
-    async fn _backup(&self) -> Result<Result<(), sj_Error>, io_Error> {
-        Ok(to_writer(File::create("accounts.json")?, &self.0))
+    async fn _backup(&self) -> Result<(), Error> {
+        Ok(to_writer(File::create(var("BACKUP_PATH")?)?, &self.0)?)
     }
 
     //  Set the database to the most recent backup
-    async fn _restore(&mut self) -> Result<(), io_Error> {
-        self.0 = from_reader(BufReader::new(File::open("accounts.json")?))?;
+    async fn _restore(&mut self) -> Result<(), Error> {
+        self.0 = from_reader(BufReader::new(File::open(var("BACKUP_PATH")?)?))?;
         Ok(())
     }
 
