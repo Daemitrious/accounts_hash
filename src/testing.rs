@@ -1,4 +1,7 @@
-use {rand::Rng, std::ops::Range};
+use {
+    rand::{thread_rng, Rng},
+    std::ops::Range,
+};
 
 const ASCII: [char; 94] = [
     '@', '`', '!', 'A', 'a', '"', 'B', 'b', '#', 'C', 'c', '$', 'D', 'd', '%', 'E', 'e', '&', 'F',
@@ -9,13 +12,11 @@ const ASCII: [char; 94] = [
 ];
 
 fn randint(range: Range<usize>) -> usize {
-    rand::thread_rng().gen_range(range)
+    thread_rng().gen_range(range)
 }
 
 pub fn randstr(size: Range<usize>) -> String {
-    let mut string = "".to_owned();
-    for _ in 0..randint(size) {
-        string.push_str(&ASCII[randint(0..93)].to_string())
-    }
-    string
+    (0..randint(size))
+        .map(|_| ASCII[randint(0..93)])
+        .collect::<String>()
 }

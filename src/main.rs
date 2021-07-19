@@ -23,7 +23,7 @@ const MIN: u32 = 555_819_297;
 const MAX: u32 = 2_122_219_134;
 
 //  A prime number of the value 1/1,000 times of `MIN`
-const PRIME: u32 = 555_767;
+const PRIME: u32 = 55579 /* 555_767 */;
 
 //  Error Messages
 const ERRORS: [&str; 7] = [
@@ -94,8 +94,7 @@ impl Database {
     async fn _gen_accounts(&mut self, amount: usize) {
         for _ in 0..amount {
             loop {
-                let (user, pass) = (&randstr(4..15), &randstr(8..25));
-                if let Ok(_) = self.add(user, pass).await {
+                if let Ok(_) = self.add(&randstr(4..15), &randstr(8..25)).await {
                     break;
                 }
             }

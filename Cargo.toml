@@ -1,5 +1,5 @@
 [package]
-name = "accounts_hash"
+name = "datars"
 version = "0.1.0"
 authors = ["Daemitrious <evandotschwartzentruber@gmail.com>"]
 edition = "2018"
