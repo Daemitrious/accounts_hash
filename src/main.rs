@@ -8,6 +8,16 @@ mod testing;
 #[cfg(feature = "testing")]
 use testing::*;
 
+use {
+    serde::{Deserialize, Serialize},
+    serde_json::{from_reader, to_writer, Error as sj_Error},
+    std::{
+        convert::TryFrom,
+        fs::File,
+        io::{stdin, BufReader, Error as io_Error},
+    },
+};
+
 //  Lowest and highest possible hash values from `String::hash()`
 const MIN: u32 = 555_819_297;
 const MAX: u32 = 2_122_219_134;
@@ -25,16 +35,6 @@ const ERRORS: [&str; 7] = [
     "Password is too short",
     "Password is too long",
 ];
-
-use {
-    serde::{Deserialize, Serialize},
-    serde_json::{from_reader, to_writer, Error as sj_Error},
-    std::{
-        convert::TryFrom,
-        fs::File,
-        io::{stdin, BufReader, Error as io_Error},
-    },
-};
 
 //  Applies a `hash` function to `String` to conveniently grab the native endian integer value
 trait Hashable {
@@ -89,6 +89,19 @@ impl Account {
 struct Database(Vec<Vec<Account>>);
 
 impl Database {
+    #[cfg(feature = "testing")]
+    //  Randomly generate and push `n` random accounts to the database
+    async fn _gen_accounts(&mut self, amount: usize) {
+        for _ in 0..amount {
+            loop {
+                let (user, pass) = (&randstr(4..15), &randstr(8..25));
+                if let Ok(_) = self.add(user, pass).await {
+                    break;
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "benchmark")]
     //  Search method based on a basic `for loop`
     async fn _normal(&self, user: &str, pass: &str) -> Result<Option<&Account>, usize> {
@@ -104,20 +117,7 @@ impl Database {
         Ok(None)
     }
 
-    #[cfg(feature = "testing")]
-    //  Randomly generate and push `n` random accounts to the database
-    async fn _gen_accounts(&mut self, amount: usize) {
-        for _ in 0..amount {
-            loop {
-                let (user, pass) = (&randstr(4..15), &randstr(8..25));
-                if let Ok(_) = self.add(user, pass).await {
-                    break;
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "benchmark")]
     //  Search method based on the hash value of the Account's `pass`
     async fn _find(&self, user: &str, pass: &str) -> Benchmark<Result<Option<&Account>, usize>> {
         let a = SystemTime::now();
@@ -245,7 +245,6 @@ async fn main() {
                 },
                 _ => (),
             }
-            {}
         }
     }
 }
