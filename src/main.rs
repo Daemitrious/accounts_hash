@@ -262,7 +262,7 @@ async fn main() {
                             if let Err(n) = data.add(cmd[1], cmd[2]).await {
                                 ERRORS[n]
                             } else {
-                                "1"
+                                "0"
                             }
                         )
                     }
