@@ -12,7 +12,6 @@ use {
     serde::{Deserialize, Serialize},
     serde_json::{from_reader, to_writer, Error as SjError},
     std::{
-        convert::TryFrom,
         env::{var, VarError},
         fs::File,
         io::{stdin, BufReader, Error as IoError},
@@ -38,6 +37,7 @@ const ERRORS: [&str; 7] = [
 ];
 
 //  Simple error handling
+#[derive(Debug)]
 enum Error {
     SjError(SjError),
     IoError(IoError),
@@ -65,8 +65,9 @@ trait Hashable {
 }
 impl Hashable for String {
     fn hash(&self) -> usize {
-        ((u32::from_ne_bytes(TryFrom::try_from(self[..4].as_bytes()).unwrap()) - MIN) / PRIME)
-            as usize
+        let mut bytes: [u8; 4] = [0; 4];
+        bytes.copy_from_slice(self[..4].as_bytes());
+        ((u32::from_ne_bytes(bytes) - MIN) / PRIME) as usize
     }
 }
 
@@ -226,13 +227,10 @@ async fn main() {
                         }
                         println!("{}", total);
                     }
-                    "backup" => println!(
-                        "{}",
-                        match data._backup().await {
-                            Ok(_) => "0",
-                            Err(_) => "1",
-                        }
-                    ),
+                    "backup" => match data._backup().await {
+                        Ok(_) => println!("0"),
+                        Err(e) => println!("{:?}", e),
+                    },
                     "restore" => println!(
                         "{}",
                         match data._restore().await {
