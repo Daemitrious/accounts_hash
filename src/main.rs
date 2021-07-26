@@ -1,19 +1,5 @@
-#[cfg(feature = "benchmark")]
-mod benchmark {
-    pub use std::time::{Duration, SystemTime};
-
-    #[derive(Debug)]
-    pub struct Benchmark<T> {
-        pub content: T,
-        pub elapsed: Duration,
-    }
-}
-
-#[cfg(feature = "benchmark")]
-use benchmark::*;
-
-#[cfg(feature = "testing")]
-mod testing {
+#[cfg(feature = "test")]
+mod test {
     use {
         rand::{thread_rng, Rng},
         std::ops::Range,
@@ -38,20 +24,19 @@ mod testing {
             .collect::<String>()
     }
 }
-#[cfg(feature = "testing")]
-use testing::*;
+#[cfg(feature = "test")]
+use test::*;
 
 use {
     serde::{Deserialize, Serialize},
-    serde_json::{from_reader, /*  from_slice, to_vec,  */ to_writer, Error as SjError},
+    serde_json::{from_reader, to_vec, to_writer, Error as SjError},
     std::{
         env::{var, VarError},
         fs::File,
-        io::{/*  stdin,  */ BufReader, Error as IoError},
-        sync::mpsc::channel,
-        thread::spawn,
+        io::{BufReader, Error as IoError},
     },
     websocket::{
+        dataframe::{DataFrame, Opcode},
         sync::Server,
         OwnedMessage::{Close, Text},
     },
@@ -109,14 +94,7 @@ impl Hashable for String {
         ((u32::from_ne_bytes(bytes) - MIN) / PRIME) as usize
     }
 }
-/*
-//  Simple `stdin`
-fn input() -> Result<String, IoError> {
-    let mut line = String::new();
-    stdin().read_line(&mut line)?;
-    Ok(line)
-}
-*/
+
 //  Determine if `user` and `pass` are legal and compatible strings
 fn check(user: &str, pass: &str) -> Result<(), usize> {
     if !user.is_ascii() {
@@ -137,7 +115,7 @@ fn check(user: &str, pass: &str) -> Result<(), usize> {
 }
 
 //  Base account struct
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug)]
 struct Account {
     user: String,
     pass: String,
@@ -146,12 +124,14 @@ impl Account {
     fn new(user: String, pass: String) -> Self {
         Account { user, pass }
     }
+    fn as_json(&self) -> Result<DataFrame, Error> {
+        Ok(DataFrame::new(true, Opcode::Binary, to_vec(self)?))
+    }
 }
 
 //  Database struct
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize)]
 struct Database(Vec<Vec<Account>>);
-
 impl Database {
     //  Build new database with preinitialized vectors
     fn new() -> Self {
@@ -204,42 +184,7 @@ impl Database {
         Ok(())
     }
 
-    #[cfg(feature = "benchmark")]
-    //  Search method based on a basic `for loop`
-    fn normal(&self, user: &str, pass: &str) -> Result<Option<Benchmark<&Account>>, usize> {
-        check(user, pass)?;
-
-        let a = SystemTime::now();
-
-        for x in self.0.iter() {
-            for account in x.iter() {
-                if account.user == user && account.pass == pass {
-                    let b = SystemTime::now();
-
-                    return Ok(Some(Benchmark {
-                        content: account,
-                        elapsed: b.duration_since(a).unwrap(),
-                    }));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    #[cfg(feature = "benchmark")]
-    //  Search method based on the hash value of the Account's `pass`
-    fn find_bm(&self, user: &str, pass: &str) -> Benchmark<Result<Option<&Account>, usize>> {
-        let a = SystemTime::now();
-        let result = self.find(user, pass);
-        let b = SystemTime::now();
-
-        Benchmark {
-            content: result,
-            elapsed: b.duration_since(a).unwrap(),
-        }
-    }
-
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "test")]
     //  Randomly generate and push `n` random accounts to the database
     fn generate_accounts(&mut self, amount: usize) {
         for _ in 0..amount {
@@ -253,6 +198,8 @@ impl Database {
 }
 
 enum Command {
+    Error,
+
     Total,
     Backup,
     Restore,
@@ -260,29 +207,18 @@ enum Command {
     Add(String, String),
     Find(String, String),
 
-    #[cfg(feature = "benchmark")]
-    Normal(String, String),
-    #[cfg(feature = "testing")]
+    #[cfg(feature = "test")]
     Random(Option<usize>),
-
-    Error,
 }
 
 fn main() {
-    let (tx, rx) = channel::<Command>();
-
     let mut data = Database::new();
 
-    drop(data.add("Username", "Password"));
-
-    let server = Server::bind("127.0.1.1:3000").unwrap();
+    let server = Server::bind("127.0.0.1:80").unwrap();
     println!("Listening on {}", server.local_addr().unwrap());
 
-    for request in server.filter_map(Result::ok) {
-        let tx = tx.clone();
-
-        // Spawn a new thread for each connection.
-        spawn(move || {
+    server.for_each(move |upgrade| {
+        if let Ok(request) = upgrade {
             if !request.protocols().contains(&"rust-websocket".to_string()) {
                 request.reject().unwrap();
                 return;
@@ -296,131 +232,135 @@ fn main() {
             let (mut receiver, mut sender) = client.split().unwrap();
 
             for message in receiver.incoming_messages() {
-                let message = message.unwrap();
+                if let Ok(message) = message {
+                    match message {
+                        Text(msg) => {
+                            let mut cmd: Vec<String> = Vec::new();
+                            for s in msg.splitn(3, " ") {
+                                cmd.push(s.to_string())
+                            }
 
-                match message {
-                    Text(msg) => {
-                        let mut cmd: Vec<String> = Vec::new();
-                        for s in msg.splitn(3, " ") {
-                            cmd.push(s.to_string())
-                        }
-                        println!("---\n{:?}\n---\n{} {}", cmd, cmd[1], cmd[2..].join(" "));
+                            //  Using `Command` variants because of `mpsc`
+                            let command = match cmd.len() {
+                                1 => match cmd[0].as_str() {
+                                    "exit" | "quit" | "close" => break,
+                                    "total" => Command::Total,
+                                    "backup" => Command::Backup,
+                                    "restore" => Command::Restore,
+                                    _ => Command::Error,
+                                },
+                                2 => match cmd[0].as_str() {
+                                    #[cfg(feature = "test")]
+                                    "random" => Command::Random(if let Ok(n) = cmd[1].parse() {
+                                        Some(n)
+                                    } else {
+                                        None
+                                    }),
+                                    _ => Command::Error,
+                                },
+                                3 => match cmd[0].as_str() {
+                                    "add" => {
+                                        Command::Add(cmd[1].clone(), cmd[2..].join(" ").clone())
+                                    }
+                                    "find" => {
+                                        Command::Find(cmd[1].clone(), cmd[2..].join(" ").clone())
+                                    }
+                                    _ => Command::Error,
+                                },
+                                _ => Command::Error,
+                            };
 
-                        let command = match cmd.len() {
-                            1 => match cmd[0].as_str() {
-                                "exit" | "quit" | "close" => break,
-                                "total" => Command::Total,
-                                "backup" => Command::Backup,
-                                "restore" => Command::Restore,
-                                _ => Command::Error,
-                            },
-                            2 => match cmd[0].as_str() {
-                                #[cfg(feature = "testing")]
-                                "random" => Command::Random(if let Ok(n) = cmd[1].parse() {
-                                    Some(n)
-                                } else {
-                                    None
-                                }),
-                                _ => Command::Error,
-                            },
-                            3 => match cmd[0].as_str() {
-                                "add" => Command::Add(cmd[1].clone(), cmd[2..].join(" ").clone()),
-                                "find" => Command::Find(cmd[1].clone(), cmd[2..].join(" ").clone()),
-                                #[cfg(feature = "benchmark")]
-                                "normal" => {
-                                    Command::Normal(cmd[1].clone(), cmd[2..].join(" ").clone())
+                            match command {
+                                Command::Add(user, pass) => {
+                                    match data.add(&user, &pass) {
+                                        Ok(_) => {
+                                            if let Err(error) = sender.send_dataframe(
+                                                &DataFrame::new(true, Opcode::Text, vec![1]),
+                                            ) {
+                                                println!("ERROR  =>  {:?}", error)
+                                            }
+                                            if let Err(error) = sender.send_message(&Text(
+                                                "Successfully Registered".to_string(),
+                                            )) {
+                                                println!("ERROR  =>  {:?}", error)
+                                            }
+                                        }
+                                        Err(n) => {
+                                            if let Err(error) =
+                                                sender.send_message(&Text(ERRORS[n].to_string()))
+                                            {
+                                                println!("ERROR  =>  {:?}", error)
+                                            }
+                                        }
+                                    }
                                 }
-                                _ => Command::Error,
-                            },
-                            _ => Command::Error,
-                        };
-                        drop(tx.send(command));
-                    }
-                    Close(_) => {
-                        sender.send_message(&Close(None)).unwrap();
-                        println!("Client {} disconnected", ip);
-                        return;
-                    }
-                    _ => (),
-                }
-            }
-        });
 
-        match rx.recv() {
-            Ok(cmd) => match cmd {
-                Command::Add(user, pass) => {
-                    println!(
-                        "{}",
-                        if let Err(n) = data.add(&user, &pass) {
-                            ERRORS[n]
-                        } else {
-                            "0"
+                                Command::Find(user, pass) => match data.find(&user, &pass) {
+                                    Ok(option) => match option {
+                                        Some(account) => {
+                                            if let Err(error) =
+                                                sender.send_dataframe(&account.as_json().unwrap())
+                                            {
+                                                println!("ERROR  =>  {:?}", error)
+                                            }
+                                        }
+                                        None => {
+                                            if let Err(error) = sender.send_message(&Text(
+                                                "Account not found".to_string(),
+                                            )) {
+                                                println!("ERROR  =>  {:?}", error)
+                                            }
+                                        }
+                                    },
+                                    Err(n) => println!("{}", ERRORS[n]),
+                                },
+
+                                Command::Total => {
+                                    let mut total = 0;
+                                    for v in data.0.iter() {
+                                        total += v.len()
+                                    }
+                                    println!("{}", total)
+                                }
+
+                                Command::Backup => match data.backup() {
+                                    Ok(_) => println!("Successfully backed up."),
+                                    Err(e) => println!("Backup Error: {:?}.", e),
+                                },
+
+                                Command::Restore => match data.restore() {
+                                    Ok(_) => println!("Successfully restored"),
+                                    Err(e) => println!("Restore Error: {:?}.", e),
+                                },
+
+                                #[cfg(feature = "test")]
+                                Command::Random(parsed) => match parsed {
+                                    Some(n) => {
+                                        data.generate_accounts(n);
+                                        println!("Successfully generated {} random accounts.", n)
+                                    }
+                                    None => {
+                                        println!("Failed to parse.")
+                                    }
+                                },
+                                _ => (),
+                            }
+                            if let Err(error) = sender.send_message(&Text("close".to_string())) {
+                                println!("ERROR  =>  {:?}", error)
+                            }
+                            //sender.shutdown_all();
                         }
-                    )
-                }
-
-                #[cfg(not(feature = "benchmark"))]
-                Command::Find(user, pass) => match data.find(&user, &pass) {
-                    Ok(account) => println!("{:?}", account),
-                    Err(n) => println!("{}", ERRORS[n]),
-                },
-
-                #[cfg(feature = "benchmark")]
-                Command::Find(user, pass) => {
-                    let Benchmark { content, elapsed } = data.find_bm(&user, &pass);
-                    match content {
-                        Ok(account) => println!("{:?} => {:?}", elapsed, account),
-                        Err(n) => println!("{}", ERRORS[n]),
+                        Close(_) => {
+                            if let Err(error) = sender.send_message(&Close(None)) {
+                                println!("ERROR  =>  {:?}", error)
+                            }
+                            println!("Client {} disconnected", ip);
+                            return;
+                        }
+                        _ => (),
                     }
                 }
-
-                Command::Total => {
-                    let mut total = 0;
-                    for v in data.0.iter() {
-                        total += v.len()
-                    }
-                    println!("{}", total);
-                }
-
-                Command::Backup => match data.backup() {
-                    Ok(_) => println!("0"),
-                    Err(e) => println!("{:?}", e),
-                },
-
-                Command::Restore => match data.restore() {
-                    Ok(_) => println!("0"),
-                    Err(e) => println!("{:?}", e),
-                },
-
-                #[cfg(feature = "testing")]
-                Command::Random(parsed) => {
-                    println!(
-                        "{}",
-                        if let Some(n) = parsed {
-                            data.generate_accounts(n);
-                            "0"
-                        } else {
-                            "1"
-                        }
-                    )
-                }
-
-                #[cfg(feature = "benchmark")]
-                Command::Normal(user, pass) => match data.normal(&user, &pass) {
-                    Ok(option) => match option {
-                        Some(benchmark) => {
-                            let Benchmark { content, elapsed } = benchmark;
-                            println!("{:?} => {:?}", elapsed, content)
-                        }
-                        None => println!("None"),
-                    },
-                    Err(n) => println!("{}", ERRORS[n]),
-                },
-                Command::Error => (),
-            },
-            Err(error) => {
-                println!("{:?}", error)
             }
         }
-    }
+    })
 }

@@ -5,13 +5,11 @@ authors = ["Daemitrious <evandotschwartzentruber@gmail.com>"]
 edition = "2018"
 
 [features]
-    benchmark = []
-    testing = ["rand"]
-    default = ["testing", "benchmark"]
+    test = ["rand"]
+    default = []
 
 [dependencies]
-rand = { version = "0.8.4", optional = true }
+rand = { version = "0.8.4", features = [], optional = true }
 serde = { version = "1.0.126", features = ["derive"] }
-serde_json = { version = "1.0.64" }
-#tokio = { version = "1.5.0", features = ["macros", "rt-multi-thread"] }
+serde_json = { version = "1.0.64", features = [] }
 websocket = { version = "0.26.2", features = ["sync"], default-features = false }
