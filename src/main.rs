@@ -24,21 +24,25 @@ mod test {
             .collect::<String>()
     }
 }
+
 #[cfg(feature = "test")]
 use test::*;
 
 use {
     serde::{Deserialize, Serialize},
-    serde_json::{from_reader, to_vec, to_writer, Error as SjError},
+    serde_json::{from_reader, from_slice, to_vec, to_writer, Error as JsonError},
     std::{
         env::{var, VarError},
         fs::File,
         io::{BufReader, Error as IoError},
+        net::TcpStream,
     },
     websocket::{
         dataframe::{DataFrame, Opcode},
+        server::{upgrade::sync::Buffer, InvalidConnection},
         sync::Server,
-        OwnedMessage::{Close, Text},
+        OwnedMessage::{Binary, Close, Text},
+        WebSocketError,
     },
 };
 
@@ -48,40 +52,6 @@ const MAX: u32 = 2_122_219_134;
 
 //  A prime number of the value 1/1,000 times of `MIN`
 const PRIME: u32 = 55579 /* 555_767 */;
-
-//  Error Messages
-const ERRORS: [&str; 7] = [
-    "Username is already taken",
-    "Username is not ASCII",
-    "Username is too short",
-    "Username is too long",
-    "Password is not ASCII",
-    "Password is too short",
-    "Password is too long",
-];
-
-//  Simple error handling
-#[derive(Debug)]
-enum Error {
-    SjError(SjError),
-    IoError(IoError),
-    VarError(VarError),
-}
-impl From<SjError> for Error {
-    fn from(error: SjError) -> Self {
-        Error::SjError(error)
-    }
-}
-impl From<IoError> for Error {
-    fn from(error: IoError) -> Self {
-        Error::IoError(error)
-    }
-}
-impl From<VarError> for Error {
-    fn from(error: VarError) -> Self {
-        Error::VarError(error)
-    }
-}
 
 //  Applies a `hash` function to `String` to conveniently grab the native endian integer value
 trait Hashable {
@@ -95,23 +65,52 @@ impl Hashable for String {
     }
 }
 
-//  Determine if `user` and `pass` are legal and compatible strings
-fn check(user: &str, pass: &str) -> Result<(), usize> {
-    if !user.is_ascii() {
-        Err(1)
-    } else if !(user.len() > 3) {
-        Err(2)
-    } else if !(user.len() < 15) {
-        Err(3)
-    } else if !pass.is_ascii() {
-        Err(4)
-    } else if !(pass.len() > 7) {
-        Err(5)
-    } else if !(pass.len() < 25) {
-        Err(6)
-    } else {
-        Ok(())
+//  Simple error handling
+#[derive(Debug)]
+enum Error {
+    JsonError(JsonError),
+    IoError(IoError),
+    VarError(VarError),
+    WsError(WebSocketError),
+    RejectError((TcpStream, IoError)),
+    InvalidConnection(InvalidConnection<TcpStream, Buffer>),
+}
+impl From<JsonError> for Error {
+    fn from(error: JsonError) -> Self {
+        Error::JsonError(error)
     }
+}
+impl From<IoError> for Error {
+    fn from(error: IoError) -> Self {
+        Error::IoError(error)
+    }
+}
+impl From<VarError> for Error {
+    fn from(error: VarError) -> Self {
+        Error::VarError(error)
+    }
+}
+impl From<WebSocketError> for Error {
+    fn from(error: WebSocketError) -> Self {
+        Error::WsError(error)
+    }
+}
+impl From<(TcpStream, IoError)> for Error {
+    fn from(error: (TcpStream, IoError)) -> Self {
+        Error::RejectError(error)
+    }
+}
+impl From<InvalidConnection<TcpStream, Buffer>> for Error {
+    fn from(error: InvalidConnection<TcpStream, Buffer>) -> Self {
+        Error::InvalidConnection(error)
+    }
+}
+
+#[derive(Deserialize, Debug)]
+struct Post {
+    cmd: String,
+    user: String,
+    pass: String,
 }
 
 //  Base account struct
@@ -139,47 +138,33 @@ impl Database {
     }
 
     //  Push new specified account into vector of the hash value of `pass` if `available_username`
-    fn add(&mut self, user: &str, pass: &str) -> Result<(), usize> {
-        match self.available_username(&user, &pass) {
-            Ok(account) => Ok(self.0[account.user.hash()].push(account)),
-            Err(why) => Err(why),
+    fn add(&mut self, user: String, pass: String) -> Result<(), ()> {
+        match self.find(user.clone(), pass.clone()) {
+            Some(_) => Err(()),
+            None => Ok(self.0[user.hash()].push(Account::new(user, pass))),
         }
     }
 
     //  Search method based on the hash value of the Account's `pass`
-    fn find(&self, user: &str, pass: &str) -> Result<Option<&Account>, usize> {
-        check(user, pass)?;
-
-        let row = &self.0[user.to_string().hash()];
+    fn find(&self, user: String, pass: String) -> Option<&Account> {
+        let row = &self.0[user.hash()];
         if row.len() > 0 {
             for account in row.iter() {
                 if user == account.user && pass == account.pass {
-                    return Ok(Some(account));
+                    return Some(account);
                 }
             }
         }
-        Ok(None)
-    }
-
-    //  Determine if `user` and `pass` are legal strings and `user` doesn't aleady exist
-    fn available_username(&self, user: &str, pass: &str) -> Result<Account, usize> {
-        check(user, pass)?;
-
-        for account in self.0[user.to_string().hash()].iter() {
-            if account.user == user {
-                return Err(0);
-            }
-        }
-        Ok(Account::new(user.to_string(), pass.to_string()))
+        None
     }
 
     //  Backup the database
-    fn backup(&self) -> Result<(), Error> {
+    fn _backup(&self) -> Result<(), Error> {
         Ok(to_writer(File::create(var("BACKUP_PATH")?)?, &self.0)?)
     }
 
     //  Set the database to the most recent backup
-    fn restore(&mut self) -> Result<(), Error> {
+    fn _restore(&mut self) -> Result<(), Error> {
         self.0 = from_reader(BufReader::new(File::open(var("BACKUP_PATH")?)?))?;
         Ok(())
     }
@@ -197,170 +182,85 @@ impl Database {
     }
 }
 
-enum Command {
-    Error,
+fn main() -> Result<(), Error> {
+    //  WebSocket Protocol
+    const PROTOCOL: &str = "rust-websocket";
 
-    Total,
-    Backup,
-    Restore,
+    //  Commands
+    const FIND: &str = "find";
+    const ADD: &str = "add";
 
-    Add(String, String),
-    Find(String, String),
+    //  Applicable with the contain method of a `request`
+    let protocol = &PROTOCOL.to_string();
 
-    #[cfg(feature = "test")]
-    Random(Option<usize>),
-}
+    //  In case of WebSocket Error
+    let close_frame = DataFrame::new(true, Opcode::Binary, vec![]);
 
-fn main() {
+    //  Messages to respond with
+    let register_success = &Text("Successfully Registered".to_string());
+    let already_exists = &Text("Username already exists".to_string());
+    let not_found = &Text("Account not found".to_string());
+
+    //  The entire database
     let mut data = Database::new();
 
-    let server = Server::bind("127.0.0.1:80").unwrap();
-    println!("Listening on {}", server.local_addr().unwrap());
+    //  Begin WebSocket Server
+    let server = Server::bind("127.0.0.1:80")?;
+    println!("Listening to {:?}\n", server.local_addr()?);
 
     server.for_each(move |upgrade| {
-        if let Ok(request) = upgrade {
-            if !request.protocols().contains(&"rust-websocket".to_string()) {
-                request.reject().unwrap();
-                return;
-            }
+        if let Err(error) = {
+            || -> Result<(), Error> {
+                let request = upgrade?;
 
-            let client = request.use_protocol("rust-websocket").accept().unwrap();
-            let ip = client.peer_addr().unwrap();
+                if request.protocols().contains(protocol) {
+                    let client = request.use_protocol(PROTOCOL).accept()?;
+                    let ip = client.peer_addr()?;
 
-            println!("Connection from {}", ip);
+                    println!("Connection from {}", ip);
 
-            let (mut receiver, mut sender) = client.split().unwrap();
+                    let (mut receiver, mut sender) = client.split()?;
 
-            for message in receiver.incoming_messages() {
-                if let Ok(message) = message {
-                    match message {
-                        Text(msg) => {
-                            let mut cmd: Vec<String> = Vec::new();
-                            for s in msg.splitn(3, " ") {
-                                cmd.push(s.to_string())
-                            }
+                    for message in receiver.incoming_messages() {
+                        let msg = message?;
 
-                            //  Using `Command` variants because of `mpsc`
-                            let command = match cmd.len() {
-                                1 => match cmd[0].as_str() {
-                                    "exit" | "quit" | "close" => break,
-                                    "total" => Command::Total,
-                                    "backup" => Command::Backup,
-                                    "restore" => Command::Restore,
-                                    _ => Command::Error,
-                                },
-                                2 => match cmd[0].as_str() {
-                                    #[cfg(feature = "test")]
-                                    "random" => Command::Random(if let Ok(n) = cmd[1].parse() {
-                                        Some(n)
-                                    } else {
-                                        None
-                                    }),
-                                    _ => Command::Error,
-                                },
-                                3 => match cmd[0].as_str() {
-                                    "add" => {
-                                        Command::Add(cmd[1].clone(), cmd[2..].join(" ").clone())
-                                    }
-                                    "find" => {
-                                        Command::Find(cmd[1].clone(), cmd[2..].join(" ").clone())
-                                    }
-                                    _ => Command::Error,
-                                },
-                                _ => Command::Error,
-                            };
+                        match msg {
+                            Binary(v) => {
+                                //  If Blob is sent, has to be in the form of a `Post`.
+                                let Post { cmd, user, pass } = from_slice::<Post>(&v)?;
 
-                            match command {
-                                Command::Add(user, pass) => {
-                                    match data.add(&user, &pass) {
-                                        Ok(_) => {
-                                            if let Err(error) = sender.send_dataframe(
-                                                &DataFrame::new(true, Opcode::Text, vec![1]),
-                                            ) {
-                                                println!("ERROR  =>  {:?}", error)
-                                            }
-                                            if let Err(error) = sender.send_message(&Text(
-                                                "Successfully Registered".to_string(),
-                                            )) {
-                                                println!("ERROR  =>  {:?}", error)
-                                            }
-                                        }
-                                        Err(n) => {
-                                            if let Err(error) =
-                                                sender.send_message(&Text(ERRORS[n].to_string()))
-                                            {
-                                                println!("ERROR  =>  {:?}", error)
-                                            }
-                                        }
-                                    }
-                                }
-
-                                Command::Find(user, pass) => match data.find(&user, &pass) {
-                                    Ok(option) => match option {
+                                match cmd.as_str() {
+                                    ADD => sender.send_message(match data.add(user, pass) {
+                                        Ok(_) => register_success,
+                                        Err(_) => already_exists,
+                                    })?,
+                                    FIND => match data.find(user, pass) {
                                         Some(account) => {
-                                            if let Err(error) =
-                                                sender.send_dataframe(&account.as_json().unwrap())
-                                            {
-                                                println!("ERROR  =>  {:?}", error)
-                                            }
+                                            sender.send_dataframe(&account.as_json()?)?;
                                         }
                                         None => {
-                                            if let Err(error) = sender.send_message(&Text(
-                                                "Account not found".to_string(),
-                                            )) {
-                                                println!("ERROR  =>  {:?}", error)
-                                            }
+                                            sender.send_message(not_found)?;
                                         }
                                     },
-                                    Err(n) => println!("{}", ERRORS[n]),
-                                },
-
-                                Command::Total => {
-                                    let mut total = 0;
-                                    for v in data.0.iter() {
-                                        total += v.len()
-                                    }
-                                    println!("{}", total)
-                                }
-
-                                Command::Backup => match data.backup() {
-                                    Ok(_) => println!("Successfully backed up."),
-                                    Err(e) => println!("Backup Error: {:?}.", e),
-                                },
-
-                                Command::Restore => match data.restore() {
-                                    Ok(_) => println!("Successfully restored"),
-                                    Err(e) => println!("Restore Error: {:?}.", e),
-                                },
-
-                                #[cfg(feature = "test")]
-                                Command::Random(parsed) => match parsed {
-                                    Some(n) => {
-                                        data.generate_accounts(n);
-                                        println!("Successfully generated {} random accounts.", n)
-                                    }
-                                    None => {
-                                        println!("Failed to parse.")
-                                    }
-                                },
-                                _ => (),
+                                    _ => unreachable!(),
+                                };
+                                sender.send_dataframe(&close_frame)?;
                             }
-                            if let Err(error) = sender.send_message(&Text("close".to_string())) {
-                                println!("ERROR  =>  {:?}", error)
+                            Close(_) => {
+                                sender.send_message(&Close(None))?;
+                                println!("Client {} disconnected", ip);
                             }
-                            //sender.shutdown_all();
+                            _ => unreachable!(),
                         }
-                        Close(_) => {
-                            if let Err(error) = sender.send_message(&Close(None)) {
-                                println!("ERROR  =>  {:?}", error)
-                            }
-                            println!("Client {} disconnected", ip);
-                            return;
-                        }
-                        _ => (),
                     }
+                } else {
+                    println!("{:?}", request.reject()?);
                 }
+                Ok(())
             }
-        }
-    })
+        }() {
+            println!("{:?}", error)
+        };
+    });
+    Ok(())
 }
