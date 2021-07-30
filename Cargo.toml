@@ -5,8 +5,8 @@ authors = ["Daemitrious <evandotschwartzentruber@gmail.com>"]
 edition = "2018"
 
 [features]
-    test = ["rand"]
-    default = []
+test = ["rand"]
+default = []
 
 [dependencies]
 rand = { version = "0.8.4", features = [], optional = true }
