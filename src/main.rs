@@ -41,7 +41,7 @@ use {
         dataframe::{DataFrame, Opcode},
         server::{upgrade::sync::Buffer, InvalidConnection},
         sync::Server,
-        OwnedMessage::{Binary, Close, Text},
+        OwnedMessage::{Binary, Close},
         WebSocketError,
     },
 };
@@ -106,22 +106,16 @@ impl From<InvalidConnection<TcpStream, Buffer>> for Error {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct Post {
-    cmd: String,
-    user: String,
-    pass: String,
-}
-
 //  Base account struct
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct Account {
     user: String,
     pass: String,
+    id: usize,
 }
 impl Account {
-    fn new(user: String, pass: String) -> Self {
-        Account { user, pass }
+    fn new(user: String, pass: String, id: usize) -> Self {
+        Account { user, pass, id }
     }
     fn as_json(&self) -> Result<DataFrame, Error> {
         Ok(DataFrame::new(true, Opcode::Binary, to_vec(self)?))
@@ -130,19 +124,14 @@ impl Account {
 
 //  Database struct
 #[derive(Deserialize, Serialize)]
-struct Database(Vec<Vec<Account>>);
+struct Database(Vec<Vec<Account>>, usize);
 impl Database {
     //  Build new database with preinitialized vectors
     fn new() -> Self {
-        Self((0..((MAX - MIN) / PRIME) + 1).map(|_| Vec::new()).collect())
-    }
-
-    //  Push new specified account into vector of the hash value of `pass` if `available_username`
-    fn add(&mut self, user: String, pass: String) -> Result<(), ()> {
-        match self.find(user.clone(), pass.clone()) {
-            Some(_) => Err(()),
-            None => Ok(self.0[user.hash()].push(Account::new(user, pass))),
-        }
+        Self(
+            (0..((MAX - MIN) / PRIME) + 1).map(|_| Vec::new()).collect(),
+            0,
+        )
     }
 
     //  Search method based on the hash value of the Account's `pass`
@@ -156,6 +145,19 @@ impl Database {
             }
         }
         None
+    }
+
+    //  Push new specified account into vector of the hash value of `pass` if `available_username`
+    fn add(&mut self, user: String, pass: String) -> Result<Account, ()> {
+        match self.find(user.clone(), pass.clone()) {
+            Some(_) => Err(()),
+            None => {
+                let account = Account::new(user.clone(), pass, self.1 + 1);
+                self.0[user.hash()].push(account.clone());
+                self.1 += 1;
+                Ok(account)
+            }
+        }
     }
 
     //  Backup the database
@@ -193,13 +195,8 @@ fn main() -> Result<(), Error> {
     //  Applicable with the contain method of a `request`
     let protocol = &PROTOCOL.to_string();
 
-    //  In case of WebSocket Error
-    let close_frame = DataFrame::new(true, Opcode::Binary, vec![]);
-
-    //  Messages to respond with
-    let register_success = &Text("Successfully Registered".to_string());
-    let already_exists = &Text("Username already exists".to_string());
-    let not_found = &Text("Account not found".to_string());
+    //  If `Err` from successful request then reply with a Blob with size of 0
+    let invalid = DataFrame::new(true, Opcode::Binary, vec![]);
 
     //  The entire database
     let mut data = Database::new();
@@ -215,6 +212,7 @@ fn main() -> Result<(), Error> {
 
                 if request.protocols().contains(protocol) {
                     let client = request.use_protocol(PROTOCOL).accept()?;
+
                     let ip = client.peer_addr()?;
 
                     println!("Connection from {}", ip);
@@ -226,25 +224,36 @@ fn main() -> Result<(), Error> {
 
                         match msg {
                             Binary(v) => {
-                                //  If Blob is sent, has to be in the form of a `Post`.
-                                let Post { cmd, user, pass } = from_slice::<Post>(&v)?;
+                                println!("Received :: {:?}", v);
 
-                                match cmd.as_str() {
-                                    ADD => sender.send_message(match data.add(user, pass) {
-                                        Ok(_) => register_success,
-                                        Err(_) => already_exists,
-                                    })?,
-                                    FIND => match data.find(user, pass) {
-                                        Some(account) => {
-                                            sender.send_dataframe(&account.as_json()?)?;
-                                        }
-                                        None => {
-                                            sender.send_message(not_found)?;
-                                        }
-                                    },
-                                    _ => unreachable!(),
-                                };
-                                sender.send_dataframe(&close_frame)?;
+                                //  If Blob is sent, has to be in the form of a `Post`.
+                                let args = from_slice::<Vec<String>>(&v)?;
+
+                                if let Err(error) = Ok({
+                                    match args.len() {
+                                        3 => match args[0].as_str() {
+                                            FIND => sender.send_dataframe(&match data
+                                                .find(args[1].clone(), args[2].clone())
+                                            {
+                                                Some(account) => account.as_json()?,
+                                                None => invalid.clone(),
+                                            })?,
+
+                                            ADD => sender.send_dataframe(&match data
+                                                .add(args[1].clone(), args[2].clone())
+                                            {
+                                                Ok(account) => account.as_json()?,
+                                                Err(_) => invalid.clone(),
+                                            })?,
+
+                                            _ => unreachable!(),
+                                        },
+                                        _ => unreachable!(),
+                                    }
+                                }) {
+                                    sender.shutdown_all()?;
+                                    return Err(error);
+                                }
                             }
                             Close(_) => {
                                 sender.send_message(&Close(None))?;
