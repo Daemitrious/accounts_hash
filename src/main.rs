@@ -35,14 +35,13 @@ use {
         env::{var, VarError},
         fs::File,
         io::{BufReader, Error as IoError},
-        net::TcpStream,
+        net::{TcpListener, TcpStream},
+        sync::{Arc, Mutex},
+        thread::spawn,
     },
-    websocket::{
-        dataframe::{DataFrame, Opcode},
-        server::{upgrade::sync::Buffer, InvalidConnection},
-        sync::Server,
-        OwnedMessage::{Binary, Close},
-        WebSocketError,
+    tungstenite::{
+        handshake::server::NoCallback, server::accept, Error as WsError, HandshakeError, Message,
+        Message::Binary, ServerHandshake,
     },
 };
 
@@ -71,9 +70,8 @@ enum Error {
     JsonError(JsonError),
     IoError(IoError),
     VarError(VarError),
-    WsError(WebSocketError),
-    RejectError((TcpStream, IoError)),
-    InvalidConnection(InvalidConnection<TcpStream, Buffer>),
+    WsError(WsError),
+    HandshakeError(HandshakeError<ServerHandshake<TcpStream, NoCallback>>),
 }
 impl From<JsonError> for Error {
     fn from(error: JsonError) -> Self {
@@ -90,19 +88,14 @@ impl From<VarError> for Error {
         Error::VarError(error)
     }
 }
-impl From<WebSocketError> for Error {
-    fn from(error: WebSocketError) -> Self {
+impl From<WsError> for Error {
+    fn from(error: WsError) -> Self {
         Error::WsError(error)
     }
 }
-impl From<(TcpStream, IoError)> for Error {
-    fn from(error: (TcpStream, IoError)) -> Self {
-        Error::RejectError(error)
-    }
-}
-impl From<InvalidConnection<TcpStream, Buffer>> for Error {
-    fn from(error: InvalidConnection<TcpStream, Buffer>) -> Self {
-        Error::InvalidConnection(error)
+impl From<HandshakeError<ServerHandshake<TcpStream, NoCallback>>> for Error {
+    fn from(error: HandshakeError<ServerHandshake<TcpStream, NoCallback>>) -> Self {
+        Error::HandshakeError(error)
     }
 }
 
@@ -117,8 +110,8 @@ impl Account {
     fn new(user: String, pass: String, id: usize) -> Self {
         Account { user, pass, id }
     }
-    fn as_json(&self) -> Result<DataFrame, Error> {
-        Ok(DataFrame::new(true, Opcode::Binary, to_vec(self)?))
+    fn as_json(&self) -> Result<Vec<u8>, Error> {
+        Ok(to_vec(self)?)
     }
 }
 
@@ -135,12 +128,12 @@ impl Database {
     }
 
     //  Search method based on the hash value of the Account's `pass`
-    fn find(&self, user: String, pass: String) -> Option<&Account> {
+    fn find(&self, user: String, pass: String) -> Option<Account> {
         let row = &self.0[user.hash()];
         if row.len() > 0 {
             for account in row.iter() {
                 if user == account.user && pass == account.pass {
-                    return Some(account);
+                    return Some(account.clone());
                 }
             }
         }
@@ -185,91 +178,60 @@ impl Database {
 }
 
 fn main() -> Result<(), Error> {
-    //  WebSocket Protocol
-    const PROTOCOL: &str = "rust-websocket";
-
     //  Commands
     const FIND: &str = "find";
     const ADD: &str = "add";
 
-    //  Applicable with the contain method of a `request`
-    let protocol = &PROTOCOL.to_string();
-
-    //  If `Err` from successful request then reply with a Blob with size of 0
-    let invalid = DataFrame::new(true, Opcode::Binary, vec![]);
-
     //  The entire database
-    let mut data = Database::new();
+    let data = Arc::new(Mutex::new(Database::new()));
 
-    //  Begin WebSocket Server
-    let server = Server::bind("127.0.0.1:80")?;
-    println!("Listening to {:?}\n", server.local_addr()?);
+    //  Initialize WebSocket Server
+    let server = TcpListener::bind("127.0.0.1:80")?;
 
-    server.for_each(move |upgrade| {
-        if let Err(error) = {
-            || -> Result<(), Error> {
-                let request = upgrade?;
+    //  Begin running the server
+    for stream in server.incoming() {
+        let thread_data = data.clone();
 
-                if request.protocols().contains(protocol) {
-                    let client = request.use_protocol(PROTOCOL).accept()?;
+        spawn(move || -> Result<(), Error> {
+            let mut websocket = accept(stream?)?;
 
-                    let ip = client.peer_addr()?;
+            match websocket.read_message()? {
+                Binary(v) => {
+                    //  All data recieved must be in the form of a JSON parsed array
+                    let args = from_slice::<Vec<String>>(&v)?;
 
-                    println!("Connection from {}", ip);
+                    match thread_data.lock() {
+                        Ok(mut data) => {
+                            if let Err(error) = Ok(match args.len() {
+                                3 => match args[0].as_str() {
+                                    FIND => websocket.write_message(Message::binary(match data
+                                        .find(args[1].clone(), args[2].clone())
+                                    {
+                                        Some(account) => account.as_json()?,
+                                        None => vec![],
+                                    }))?,
 
-                    let (mut receiver, mut sender) = client.split()?;
+                                    ADD => websocket.write_message(Message::binary(match data
+                                        .add(args[1].clone(), args[2].clone())
+                                    {
+                                        Ok(account) => account.as_json()?,
+                                        Err(_) => vec![],
+                                    }))?,
 
-                    for message in receiver.incoming_messages() {
-                        let msg = message?;
-
-                        match msg {
-                            Binary(v) => {
-                                println!("Received :: {:?}", v);
-
-                                //  If Blob is sent, has to be in the form of a `Post`.
-                                let args = from_slice::<Vec<String>>(&v)?;
-
-                                if let Err(error) = Ok({
-                                    match args.len() {
-                                        3 => match args[0].as_str() {
-                                            FIND => sender.send_dataframe(&match data
-                                                .find(args[1].clone(), args[2].clone())
-                                            {
-                                                Some(account) => account.as_json()?,
-                                                None => invalid.clone(),
-                                            })?,
-
-                                            ADD => sender.send_dataframe(&match data
-                                                .add(args[1].clone(), args[2].clone())
-                                            {
-                                                Ok(account) => account.as_json()?,
-                                                Err(_) => invalid.clone(),
-                                            })?,
-
-                                            _ => unreachable!(),
-                                        },
-                                        _ => unreachable!(),
-                                    }
-                                }) {
-                                    sender.shutdown_all()?;
-                                    return Err(error);
-                                }
+                                    _ => unreachable!(),
+                                },
+                                _ => unreachable!(),
+                            }) {
+                                return Err(error);
                             }
-                            Close(_) => {
-                                sender.send_message(&Close(None))?;
-                                println!("Client {} disconnected", ip);
-                            }
-                            _ => unreachable!(),
                         }
+                        Err(error) => return Ok(println!("{:?}", error)),
                     }
-                } else {
-                    println!("{:?}", request.reject()?);
                 }
-                Ok(())
+                _ => (),
             }
-        }() {
-            println!("{:?}", error)
-        };
-    });
+            Ok(())
+        });
+    }
     Ok(())
 }
