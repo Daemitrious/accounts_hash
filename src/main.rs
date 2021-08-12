@@ -29,86 +29,79 @@ mod test {
 use test::*;
 
 use {
+    native_tls::{Identity, TlsAcceptor},
     serde::{Deserialize, Serialize},
-    serde_json::{from_reader, from_slice, to_vec, to_writer, Error as JsonError},
+    serde_json::{from_reader, from_slice, to_vec, to_writer},
     std::{
-        env::{var, VarError},
+        env::var,
+        error::Error as Errorable,
+        fmt::Debug,
         fs::File,
-        io::{BufReader, Error as IoError},
+        io::{BufReader, Error as IoError, Read},
         net::{TcpListener, TcpStream},
+        ops::{Index, IndexMut},
         sync::{Arc, Mutex},
         thread::spawn,
     },
-    tungstenite::{
-        handshake::server::NoCallback, server::accept, Error as WsError, HandshakeError, Message,
-        Message::Binary, ServerHandshake,
-    },
+    tungstenite::{server::accept, Message, Message::Binary},
 };
 
 //  Lowest and highest possible hash values from `String::hash()`
 const MIN: u32 = 555_819_297;
 const MAX: u32 = 2_122_219_134;
 
-//  A prime number of the value 1/1,000 times of `MIN`
-const PRIME: u32 = 55579 /* 555_767 */;
+//  A prime number of the value one 10,000th of `MIN`
+const PRIME: u32 = 55_579 /* 555_767 */;
 
 //  Applies a `hash` function to `String` to conveniently grab the native endian integer value
 trait Hashable {
-    fn hash(&self) -> usize;
+    fn hash(&self) -> u32;
 }
 impl Hashable for String {
-    fn hash(&self) -> usize {
+    fn hash(&self) -> u32 {
         let mut bytes: [u8; 4] = [0; 4];
         bytes.copy_from_slice(self[..4].as_bytes());
-        ((u32::from_ne_bytes(bytes) - MIN) / PRIME) as usize
+        (u32::from_ne_bytes(bytes) - MIN) / PRIME
     }
 }
 
 //  Simple error handling
-#[derive(Debug)]
 enum Error {
-    JsonError(JsonError),
-    IoError(IoError),
-    VarError(VarError),
-    WsError(WsError),
-    HandshakeError(HandshakeError<ServerHandshake<TcpStream, NoCallback>>),
+    Text(String),
 }
-impl From<JsonError> for Error {
-    fn from(error: JsonError) -> Self {
-        Error::JsonError(error)
+
+impl<T> From<T> for Error
+where
+    T: Errorable,
+{
+    fn from(error: T) -> Self {
+        Self::Text(error.to_string())
     }
 }
-impl From<IoError> for Error {
-    fn from(error: IoError) -> Self {
-        Error::IoError(error)
-    }
-}
-impl From<VarError> for Error {
-    fn from(error: VarError) -> Self {
-        Error::VarError(error)
-    }
-}
-impl From<WsError> for Error {
-    fn from(error: WsError) -> Self {
-        Error::WsError(error)
-    }
-}
-impl From<HandshakeError<ServerHandshake<TcpStream, NoCallback>>> for Error {
-    fn from(error: HandshakeError<ServerHandshake<TcpStream, NoCallback>>) -> Self {
-        Error::HandshakeError(error)
+
+impl Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self::Text(s) = self;
+        f.write_str(s)
     }
 }
 
 //  Base account struct
 #[derive(Deserialize, Serialize, Debug, Clone)]
 struct Account {
+    email: Option<String>,
     user: String,
     pass: String,
     id: usize,
 }
 impl Account {
     fn new(user: String, pass: String, id: usize) -> Self {
-        Account { user, pass, id }
+        Account {
+            email: None,
+            user,
+            pass,
+            id,
+        }
     }
     fn as_json(&self) -> Result<Vec<u8>, Error> {
         Ok(to_vec(self)?)
@@ -118,6 +111,21 @@ impl Account {
 //  Database struct
 #[derive(Deserialize, Serialize)]
 struct Database(Vec<Vec<Account>>, usize);
+
+impl Index<u32> for Database {
+    type Output = Vec<Account>;
+
+    fn index(&self, index: u32) -> &Self::Output {
+        &self.0[index as usize]
+    }
+}
+
+impl IndexMut<u32> for Database {
+    fn index_mut(&mut self, index: u32) -> &mut Self::Output {
+        &mut self.0[index as usize]
+    }
+}
+
 impl Database {
     //  Build new database with preinitialized vectors
     fn new() -> Self {
@@ -129,7 +137,7 @@ impl Database {
 
     //  Search method based on the hash value of the Account's `pass`
     fn find(&self, user: String, pass: String) -> Option<Account> {
-        let row = &self.0[user.hash()];
+        let row = &self[user.hash()];
         if row.len() > 0 {
             for account in row.iter() {
                 if user == account.user && pass == account.pass {
@@ -146,14 +154,14 @@ impl Database {
             Some(_) => Err(()),
             None => {
                 let account = Account::new(user.clone(), pass, self.1 + 1);
-                self.0[user.hash()].push(account.clone());
+                self[user.hash()].push(account.clone());
                 self.1 += 1;
                 Ok(account)
             }
         }
     }
 
-    //  Backup the database
+    //  Backup the database  |  Might spawn as a new thread
     fn _backup(&self) -> Result<(), Error> {
         Ok(to_writer(File::create(var("BACKUP_PATH")?)?, &self.0)?)
     }
@@ -169,7 +177,7 @@ impl Database {
     fn generate_accounts(&mut self, amount: usize) {
         for _ in 0..amount {
             loop {
-                if let Ok(_) = self.add(&randstr(4..15), &randstr(8..25)) {
+                if let Ok(_) = self.add(randstr(4..15), randstr(8..25)) {
                     break;
                 }
             }
@@ -177,60 +185,68 @@ impl Database {
     }
 }
 
+fn handle_client(
+    stream: Result<TcpStream, IoError>,
+    thread_acceptor: Arc<TlsAcceptor>,
+    thread_data: Arc<Mutex<Database>>,
+) -> Result<(), Error> {
+    let mut websocket = accept(thread_acceptor.accept(stream?)?)?;
+
+    if let Binary(v) = websocket.read_message()? {
+        //  All data recieved must be in the form of a JSON parsed array
+        let args = from_slice::<Vec<String>>(&v)?;
+
+        match thread_data.lock() {
+            Ok(mut data) => match args.len() {
+                3 => match args[0].as_str() {
+                    "find" => websocket.write_message(Message::binary(
+                        match data.find(args[1].clone(), args[2].clone()) {
+                            Some(account) => account.as_json()?,
+                            None => vec![],
+                        },
+                    ))?,
+
+                    "add" => websocket.write_message(Message::binary(
+                        match data.add(args[1].clone(), args[2].clone()) {
+                            Ok(account) => account.as_json()?,
+                            Err(_) => vec![],
+                        },
+                    ))?,
+                    _ => unreachable!(),
+                },
+                _ => unreachable!(),
+            },
+            Err(error) => println!("{:?}", error),
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Error> {
-    //  Commands
-    const FIND: &str = "find";
-    const ADD: &str = "add";
+    let identity = Identity::from_pkcs12(
+        &{
+            let mut identity = vec![];
+            File::open("identity.pfx")?.read_to_end(&mut identity)?;
+            identity
+        },
+        "PASSWORD",
+    )?;
+
+    //  TLS Acceptor
+    let acceptor = Arc::new(TlsAcceptor::new(identity)?);
 
     //  The entire database
     let data = Arc::new(Mutex::new(Database::new()));
 
-    //  Initialize WebSocket Server
-    let server = TcpListener::bind("127.0.0.1:80")?;
-
     //  Begin running the server
-    for stream in server.incoming() {
+    for stream in TcpListener::bind("192.168.4.30:100")?.incoming() {
         let thread_data = data.clone();
+        let thread_acceptor = acceptor.clone();
 
-        spawn(move || -> Result<(), Error> {
-            let mut websocket = accept(stream?)?;
-
-            match websocket.read_message()? {
-                Binary(v) => {
-                    //  All data recieved must be in the form of a JSON parsed array
-                    let args = from_slice::<Vec<String>>(&v)?;
-
-                    match thread_data.lock() {
-                        Ok(mut data) => {
-                            if let Err(error) = Ok(match args.len() {
-                                3 => match args[0].as_str() {
-                                    FIND => websocket.write_message(Message::binary(match data
-                                        .find(args[1].clone(), args[2].clone())
-                                    {
-                                        Some(account) => account.as_json()?,
-                                        None => vec![],
-                                    }))?,
-
-                                    ADD => websocket.write_message(Message::binary(match data
-                                        .add(args[1].clone(), args[2].clone())
-                                    {
-                                        Ok(account) => account.as_json()?,
-                                        Err(_) => vec![],
-                                    }))?,
-
-                                    _ => unreachable!(),
-                                },
-                                _ => unreachable!(),
-                            }) {
-                                return Err(error);
-                            }
-                        }
-                        Err(error) => return Ok(println!("{:?}", error)),
-                    }
-                }
-                _ => (),
+        spawn(move || {
+            if let Err(Error::Text(error)) = handle_client(stream, thread_acceptor, thread_data) {
+                println!("{}", error)
             }
-            Ok(())
         });
     }
     Ok(())

@@ -1,4 +1,5 @@
 # datars
+Memory based database with integrated Web Socket Server.
 
 # Benchmarking
-Based on a database holding 50 million accounts, on average, it takes ~**600**µs (*microseconds*) to find the a specific account.
+Takes around **30**µs (*microseconds*) to locate a specific account from amongst 50 million other accounts.
