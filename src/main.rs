@@ -29,7 +29,6 @@ mod test {
 use test::*;
 
 use {
-    native_tls::{Identity, TlsAcceptor},
     serde::{Deserialize, Serialize},
     serde_json::{from_reader, from_slice, to_vec, to_writer},
     std::{
@@ -37,7 +36,7 @@ use {
         error::Error as Errorable,
         fmt::Debug,
         fs::File,
-        io::{BufReader, Error as IoError, Read},
+        io::{BufReader, Error as IoError},
         net::{TcpListener, TcpStream},
         ops::{Index, IndexMut},
         sync::{Arc, Mutex},
@@ -187,64 +186,47 @@ impl Database {
 
 fn handle_client(
     stream: Result<TcpStream, IoError>,
-    thread_acceptor: Arc<TlsAcceptor>,
     thread_data: Arc<Mutex<Database>>,
 ) -> Result<(), Error> {
-    let mut websocket = accept(thread_acceptor.accept(stream?)?)?;
+    let mut socket = accept(stream?)?;
 
-    if let Binary(v) = websocket.read_message()? {
-        //  All data recieved must be in the form of a JSON parsed array
+    if let Binary(v) = socket.read_message()? {
+        //  All data recieved must be in the form of a JSON parsed array of binary data
         let args = from_slice::<Vec<String>>(&v)?;
 
-        match thread_data.lock() {
-            Ok(mut data) => match args.len() {
-                3 => match args[0].as_str() {
-                    "find" => websocket.write_message(Message::binary(
-                        match data.find(args[1].clone(), args[2].clone()) {
-                            Some(account) => account.as_json()?,
-                            None => vec![],
-                        },
-                    ))?,
+        match args.len() {
+            3 => match args[0].as_str() {
+                "find" => socket.write_message(Message::binary(
+                    match thread_data.lock()?.find(args[1].clone(), args[2].clone()) {
+                        Some(account) => account.as_json()?,
+                        None => vec![],
+                    },
+                ))?,
 
-                    "add" => websocket.write_message(Message::binary(
-                        match data.add(args[1].clone(), args[2].clone()) {
-                            Ok(account) => account.as_json()?,
-                            Err(_) => vec![],
-                        },
-                    ))?,
-                    _ => unreachable!(),
-                },
+                "add" => socket.write_message(Message::binary(
+                    match thread_data.lock()?.add(args[1].clone(), args[2].clone()) {
+                        Ok(account) => account.as_json()?,
+                        Err(_) => vec![],
+                    },
+                ))?,
                 _ => unreachable!(),
             },
-            Err(error) => println!("{:?}", error),
+            _ => unreachable!(),
         }
     }
     Ok(())
 }
 
 fn main() -> Result<(), Error> {
-    let identity = Identity::from_pkcs12(
-        &{
-            let mut identity = vec![];
-            File::open("identity.pfx")?.read_to_end(&mut identity)?;
-            identity
-        },
-        "PASSWORD",
-    )?;
-
-    //  TLS Acceptor
-    let acceptor = Arc::new(TlsAcceptor::new(identity)?);
-
     //  The entire database
     let data = Arc::new(Mutex::new(Database::new()));
 
     //  Begin running the server
-    for stream in TcpListener::bind("192.168.4.30:100")?.incoming() {
+    for stream in TcpListener::bind("192.168.4.30:420")?.incoming() {
         let thread_data = data.clone();
-        let thread_acceptor = acceptor.clone();
 
         spawn(move || {
-            if let Err(Error::Text(error)) = handle_client(stream, thread_acceptor, thread_data) {
+            if let Err(Error::Text(error)) = handle_client(stream, thread_data) {
                 println!("{}", error)
             }
         });
