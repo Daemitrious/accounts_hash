@@ -162,12 +162,12 @@ impl Database {
 
     //  Backup the database  |  Might spawn as a new thread
     fn _backup(&self) -> Result<(), Error> {
-        Ok(to_writer(File::create(var("BACKUP_PATH")?)?, &self.0)?)
+        Ok(to_writer(File::create(var("DATARS_PATH")?)?, &self.0)?)
     }
 
     //  Set the database to the most recent backup
     fn _restore(&mut self) -> Result<(), Error> {
-        self.0 = from_reader(BufReader::new(File::open(var("BACKUP_PATH")?)?))?;
+        self.0 = from_reader(BufReader::new(File::open(var("DATARS_PATH")?)?))?;
         Ok(())
     }
 
@@ -221,8 +221,13 @@ fn main() -> Result<(), Error> {
     //  The entire database
     let data = Arc::new(Mutex::new(Database::new()));
 
+    //  Localized TCP Server
+    let server = TcpListener::bind(var("DATARS_ADDR")?.to_owned() + ":" + &var("DATARS_PORT")?)?;
+
+    println!("Listening to {}", server.local_addr()?);
+
     //  Begin running the server
-    for stream in TcpListener::bind("192.168.4.30:420")?.incoming() {
+    for stream in server.incoming() {
         let thread_data = data.clone();
 
         spawn(move || {
